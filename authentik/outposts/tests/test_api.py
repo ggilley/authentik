@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from django.urls import reverse
+from dramatiq import actor, get_broker
 from rest_framework.test import APITestCase
 
 from authentik.blueprints.tests import reconcile_app
@@ -15,6 +16,7 @@ from authentik.outposts.models import Outpost, OutpostType, default_outpost_conf
 from authentik.outposts.tasks import CACHE_KEY_OUTPOST_DOWN
 from authentik.providers.ldap.models import LDAPProvider
 from authentik.providers.proxy.models import ProxyProvider
+from authentik.tasks.models import Task, TaskLog
 
 
 class TestOutpostServiceConnectionsAPI(APITestCase):
@@ -154,6 +156,30 @@ class TestOutpostServiceConnectionsAPI(APITestCase):
             outpost.delete()
 
         user_create.assert_not_called()
+
+    @patch("authentik.outposts.signals.cache.set")
+    @patch("authentik.outposts.signals.outpost_controller.send_with_options")
+    def test_delete_outpost_keeps_task_logs(self, _controller_send, _cache_set):
+        """Test outpost deletion doesn't cascade to task history."""
+
+        @actor
+        def test_task():
+            pass
+
+        outpost = Outpost.objects.create(
+            name=generate_id(),
+            type=OutpostType.PROXY,
+            _config=default_outpost_config(),
+        )
+        test_task.send_with_options(rel_obj=outpost)
+        task = Task.objects.get(actor_name=test_task.actor_name)
+
+        outpost.delete()
+
+        self.assertTrue(Task.objects.filter(pk=task.pk).exists())
+        self.assertGreater(TaskLog.objects.filter(task=task).count(), 0)
+        broker = get_broker()
+        del broker.actors[test_task.actor_name]
 
     @patch("authentik.outposts.signals.cache.set")
     @patch("authentik.outposts.signals.outpost_controller.send_with_options")
